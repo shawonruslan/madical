@@ -30,3 +30,6 @@ workflow-এ প্রতিদিন সকাল ৯টায় (BD) নি�
 - **খরচ:** private repo-তে GitHub মাসে ২০০০ মিনিট ফ্রি দেয়। ২ ঘণ্টার এক run মানে ১২০ মিনিট। public repo-তে মিনিটের সীমা নেই, আর secrets তখনও গোপন থাকে।
 - GitHub Actions সারাক্ষণ চালু রাখার server নয়। একটানা ২৪ ঘণ্টা চালানোর জন্য বারবার run দেওয়া GitHub-এর নিয়মের বাইরে যেতে পারে। দরকারের সময় run দিন।
 - GitHub-এর server-এর IP wafid আটকে দিলে Telegram-এ "site not responding" আসবে।
+
+## wafid যদি GitHub-কে আটকে দেয় (PROXY)
+log-এ বারবার `FAILED: timeout` বা `challenge page` এলে বুঝবেন wafid GitHub-এর server থেকে আসা request আটকাচ্ছে। তখন একটা proxy-র ঠিকানা **Secrets**-এ `PROXY` নামে দিন। ফরম্যাট: `http://user:pass@host:port`। বাংলাদেশের residential proxy হলে সবচেয়ে ভালো কাজ করে।

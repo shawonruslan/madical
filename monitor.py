@@ -4,7 +4,8 @@ Wafid auto-assign monitor -> Telegram.
 Read-only: loads the public book-appointment page, reads COUNTRY_MEDICAL_CENTER
 (the center the server auto-assigns next per destination) and reports changes.
 """
-import json, os, re, sys, time, random, urllib.request, urllib.error, urllib.parse
+import json, os, re, sys, time, random, socket, threading, urllib.request, urllib.error, urllib.parse
+socket.setdefaulttimeout(25)
 from datetime import datetime, timezone, timedelta
 
 URL = os.environ.get("WAFID_URL", "https://wafid.com/en/book-appointment/")
@@ -64,21 +65,38 @@ def tg(text):
             log("telegram error", e)
         time.sleep(3)
 
-def fetch():
-    req = urllib.request.Request(URL, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9"})
+PROXY = os.environ.get("PROXY", "").strip()
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})) if PROXY else urllib.request.build_opener()
+
+def _fetch_raw(out):
+    req = urllib.request.Request(URL, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml",
+                                              "Accept-Language": "en-US,en;q=0.9", "Cache-Control": "no-cache"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            html = r.read().decode("utf-8", "ignore"); code = r.status
+        with _opener.open(req, timeout=25) as r:
+            out["html"] = r.read().decode("utf-8", "ignore"); out["code"] = r.status
     except urllib.error.HTTPError as e:
-        return None, e.code
+        out["code"] = e.code; out["err"] = f"HTTP {e.code}"
+    except Exception as e:
+        out["err"] = f"{type(e).__name__}: {e}"
+
+def fetch():
+    """Returns (live|None, reason). Hard limit of 40 s per check so it can never hang."""
+    out = {}; t0 = time.time()
+    th = threading.Thread(target=_fetch_raw, args=(out,), daemon=True); th.start(); th.join(40)
+    ms = int((time.time() - t0) * 1000)
+    if th.is_alive(): return None, f"timeout after {ms} ms (no answer from wafid)"
+    if "html" not in out: return None, out.get("err", "unknown error") + f" ({ms} ms)"
+    html, code = out["html"], out.get("code")
     m = re.search(r'COUNTRY_MEDICAL_CENTER\s*=\s*JSON\.parse\("((?:[^"\\]|\\.)*)"\)', html)
-    if not m: return None, code
+    if not m:
+        hint = "captcha/challenge page" if re.search(r"cf-chl|challenge|Just a moment|Attention Required", html, re.I) else "page without center data"
+        return None, f"HTTP {code}, {hint}, {len(html)} bytes ({ms} ms)"
     data = json.loads(json.loads('"' + m.group(1) + '"'))
     live = {}
     for row in data.get(COUNTRY, []):
         cid, name, _, dest = row[0], row[1], row[2], row[3]
         live[str(dest)] = {"id": str(cid), "name": name}
-    return live, code
+    return live, f"HTTP {code}, {len(html)} bytes ({ms} ms)"
 
 def load():
     try:
@@ -118,20 +136,22 @@ def main():
     started = now(); end = started + RUN_MIN * 60
     last_summary = now(); fails = 0; checks = 0; err_notified = False; backoff = 0
     first = not st["current"]
-    log(f"start: country={COUNTRY} interval={INTERVAL}s run={RUN_MIN}min targets={target_text()}")
+    log(f"start: country={COUNTRY} interval={INTERVAL}s run={RUN_MIN}min targets={target_text()} proxy={'yes' if PROXY else 'no'}")
+    tg(f"<b>Wafid monitor: run started</b>\nTargets: {esc(target_text())}\nCheck every {INTERVAL}s. First check now...")
     while now() < end:
-        live, code = fetch()
+        live, why = fetch()
         checks += 1
         if live is None:
             fails += 1
-            backoff = min(backoff + 1, 5)
-            log(f"fetch failed HTTP {code} (#{fails})")
-            if fails == 5 and not err_notified:
-                tg(f"<b>Wafid monitor: site not responding</b>\nLast status: HTTP {code}. The monitor keeps trying with longer pauses.")
+            backoff = min(backoff + 1, 3)
+            log(f"check #{checks} FAILED: {why} (fail #{fails})")
+            if fails == 2 and not err_notified:
+                tg(f"<b>Wafid monitor: cannot read wafid</b>\n{esc(why)}\nKeeps retrying. If this continues, wafid is blocking GitHub's servers: add a PROXY secret (see README).")
                 err_notified = True
         else:
             if err_notified: tg("<b>Wafid monitor: site is back</b>, checks resumed.")
             fails = 0; err_notified = False; backoff = 0
+            log(f"check #{checks} ok: {why} | " + " ".join(f"{d}=#{c['id']}" for d, c in sorted(live.items())))
             t = now(); changes = []
             for dest, c in live.items():
                 old = st["current"].get(dest)
@@ -166,7 +186,7 @@ def main():
                 last_summary = now()
                 tg(f"<b>Wafid status</b> {bdt(now())}\n\n{board(st)}\n\n{checks} checks in this run · targets {esc(target_text())}")
         sleep = INTERVAL * (2 ** backoff) + random.uniform(0, 5)
-        sleep = min(sleep, 900, max(0, end - now()))
+        sleep = min(sleep, 300, max(0, end - now()))
         if sleep <= 0: break
         time.sleep(sleep)
     save(st)

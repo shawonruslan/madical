@@ -30,8 +30,17 @@ jobs:
           key: wafid-state-${{ github.run_id }}
           restore-keys: wafid-state-
 
+      - name: Connection test
+        continue-on-error: true
+        run: |
+          curl -sS -o page.html -w "wafid answered: HTTP %{http_code}, %{size_download} bytes, %{time_total}s\n" --max-time 40 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" \
+            https://wafid.com/en/book-appointment/ || echo "wafid did not answer within 40s"
+          grep -c "COUNTRY_MEDICAL_CENTER" page.html 2>/dev/null | sed 's/^/center data found: /' || true
+
       - name: Monitor
         env:
+          PROXY: ${{ secrets.PROXY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TARGETS: ${{ vars.TARGETS || secrets.TARGETS }}
