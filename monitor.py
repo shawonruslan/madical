@@ -79,6 +79,24 @@ def _fetch_raw(out):
     except Exception as e:
         out["err"] = f"{type(e).__name__}: {e}"
 
+_upd = {"offset": None}
+def tg_commands():
+    """Returns True if someone in TG_CHAT sent /status (or /now) since last call."""
+    if not (TG_TOKEN and TG_CHAT): return False
+    q = {"timeout": 0, "allowed_updates": '["message"]'}
+    if _upd["offset"] is not None: q["offset"] = _upd["offset"]
+    try:
+        r = json.loads(urllib.request.urlopen(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates?" + urllib.parse.urlencode(q), timeout=15).read())
+    except Exception:
+        return False
+    want = False
+    for u in r.get("result", []):
+        _upd["offset"] = u["update_id"] + 1
+        m = u.get("message") or {}
+        if str((m.get("chat") or {}).get("id")) == TG_CHAT and re.match(r"^/(status|now)\b", (m.get("text") or "").strip(), re.I):
+            want = True
+    return want
+
 def fetch():
     """Returns (live|None, reason). Hard limit of 40 s per check so it can never hang."""
     out = {}; t0 = time.time()
@@ -135,7 +153,8 @@ def main():
     st = load()
     started = now(); end = started + RUN_MIN * 60
     last_summary = now(); fails = 0; checks = 0; err_notified = False; backoff = 0
-    first = not st["current"]
+    first = True
+    tg_commands()  # skip old messages
     log(f"start: country={COUNTRY} interval={INTERVAL}s run={RUN_MIN}min targets={target_text()} proxy={'yes' if PROXY else 'no'}")
     tg(f"<b>Wafid monitor: run started</b>\nTargets: {esc(target_text())}\nCheck every {INTERVAL}s. First check now...")
     while now() < end:
@@ -166,7 +185,7 @@ def main():
             save(st)
             if first:
                 first = False
-                tg(f"<b>Wafid monitor started</b> ({COUNTRY})\n\n{board(st)}\n\nTargets: {esc(target_text())}\nCheck every {INTERVAL}s")
+                tg(f"<b>Auto assign now</b> ({COUNTRY}) {bdt(now())}\n\n{board(st)}\n\nTargets: {esc(target_text())}\nCheck every {INTERVAL}s · send /status anytime")
             for ev in changes:
                 g = avg_gap(st, ev["dest"])
                 gtxt = f"\nAverage change gap for {ev['dest']}: <b>{dur(g[0])}</b> ({g[1]} changes)" if g else ""
@@ -182,6 +201,8 @@ def main():
                        f"#{esc(ev['from'])} {esc(ev['from_name'])}{held}\n-> <b>#{esc(ev['id'])} {esc(ev['name'])}</b>\n"
                        f"{bdt(ev['at'])}{gtxt}")
             if changes: log("changes:", ", ".join(f"{e['dest']} {e['from']}->{e['id']}" for e in changes))
+            if tg_commands():
+                tg(f"<b>Auto assign now</b> ({COUNTRY}) {bdt(now())}\n\n{board(st)}\n\nLast check {bdt(st_check := now())} · {checks} checks this run")
             if SUMMARY_MIN > 0 and now() - last_summary >= SUMMARY_MIN * 60:
                 last_summary = now()
                 tg(f"<b>Wafid status</b> {bdt(now())}\n\n{board(st)}\n\n{checks} checks in this run · targets {esc(target_text())}")
