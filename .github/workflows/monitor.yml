@@ -1,0 +1,49 @@
+name: Wafid monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: "How long this run monitors (minutes, max 350)"
+        default: "120"
+  schedule:
+    - cron: "0 3 * * *"   # optional daily run at 09:00 BD time; delete these two lines if not needed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wafid-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore history
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: wafid-state-${{ github.run_id }}
+          restore-keys: wafid-state-
+
+      - name: Monitor
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TARGETS: ${{ vars.TARGETS || secrets.TARGETS }}
+          COUNTRY: ${{ vars.COUNTRY || 'BD' }}
+          INTERVAL_SEC: ${{ vars.INTERVAL_SEC || '30' }}
+          SUMMARY_MINUTES: ${{ vars.SUMMARY_MINUTES || '60' }}
+          RUN_MINUTES: ${{ inputs.run_minutes || '120' }}
+        run: python3 monitor.py
+
+      - name: Save history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: wafid-state-${{ github.run_id }}
