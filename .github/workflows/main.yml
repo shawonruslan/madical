@@ -42,13 +42,14 @@ jobs:
             sudo ln -sf /dev/binderfs/* /dev/ 2>/dev/null || true
           fi
 
+          sudo chmod 666 /dev/binder* /dev/binderfs/* 2>/dev/null || true
           ls -la /dev/binder*
 
       - name: Install Desktop Environment, Weston, Mesa & noVNC
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xfce4 xfce4-terminal dbus-x11 \
-            weston xwayland mesa-utils libgl1-mesa-dri \
+            weston xwayland mesa-utils libgl1-mesa-dri iptables dnsmasq pulseaudio \
             tigervnc-standalone-server tigervnc-common \
             novnc websockify python3-numpy net-tools
 
@@ -69,30 +70,42 @@ jobs:
           persist.waydroid.udev=false
           EOF
 
-          # Fix LXC container permissions & network on Azure runners
+          # Fix LXC container apparmor & permissions on Azure runners
           sudo sed -i 's/lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/g' /var/lib/waydroid/lxc/waydroid/config 2>/dev/null || true
           sudo waydroid upgrade -o
 
-      - name: Configure VNC, Autostart Waydroid & Root Shell Shortcut
+      - name: Configure VNC, Autostart Waydroid & PulseAudio Socket
         run: |
           mkdir -p ~/.vnc ~/Desktop
           touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # Auto-launch Weston + Waydroid inside XFCE session
+          # Auto-detect Weston Wayland socket, create dummy pulse socket & launch Waydroid
           cat << 'EOF' > ~/Desktop/start-waydroid.sh
           #!/bin/bash
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
           export LIBGL_ALWAYS_SOFTWARE=1
-          mkdir -p "$XDG_RUNTIME_DIR"
+          mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
+          touch "$XDG_RUNTIME_DIR/pulse/native"
+          sudo chmod 666 /dev/binder* /dev/binderfs/* 2>/dev/null || true
+
           pkill -f weston || true
+          rm -f "$XDG_RUNTIME_DIR"/wayland-*
           sudo systemctl restart waydroid-container
           sleep 2
-          weston --backend=x11-backend.so --width=1280 --height=720 &
-          sleep 3
-          WAYLAND_DISPLAY=wayland-1 waydroid show-full-ui &
+
+          weston --backend=x11-backend.so --width=1280 --height=720 > /tmp/weston.log 2>&1 &
+          for i in {1..15}; do
+            SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
+            [ -n "$SOCK" ] && break
+            sleep 1
+          done
+
+          export WAYLAND_DISPLAY=$(basename "$SOCK")
+          echo "Launching Waydroid on $WAYLAND_DISPLAY..." > /tmp/waydroid-ui.log
+          waydroid show-full-ui >> /tmp/waydroid-ui.log 2>&1 &
           EOF
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-waydroid.sh
           chmod +x ~/Desktop/start-waydroid.sh
@@ -103,8 +116,9 @@ jobs:
           unset DBUS_SESSION_BUS_ADDRESS
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
           export LIBGL_ALWAYS_SOFTWARE=1
-          mkdir -p "$XDG_RUNTIME_DIR"
+          mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
+          touch "$XDG_RUNTIME_DIR/pulse/native"
           (sleep 4 && ~/Desktop/start-waydroid.sh) &
           exec dbus-launch --exit-with-session startxfce4
           EOF
