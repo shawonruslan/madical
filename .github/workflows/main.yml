@@ -1,0 +1,107 @@
+name: Waydroid Root in Browser (Cloudflare Tunnel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_duration:
+        description: 'Keep session alive (in minutes, max 350)'
+        required: true
+        default: '180'
+      android_type:
+        description: 'Android Image Type (VANILLA or GAPPS)'
+        required: true
+        default: 'VANILLA'
+
+jobs:
+  run-waydroid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check Hardware & Kernel Capabilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget lsb-release ca-certificates gnupg software-properties-common
+
+      - name: Install Binder Kernel Module (Required for Waydroid)
+        run: |
+          sudo apt-get install -y linux-modules-extra-$(uname -r) || true
+          if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"; then
+            echo "Standard binder module missing, building binder_linux via DKMS..."
+            sudo apt-get install -y dkms git build-essential linux-headers-$(uname -r)
+            git clone https://github.com/choff/anbox-modules.git /tmp/anbox-modules
+            cd /tmp/anbox-modules
+            sudo cp anbox.conf /etc/modules-load.d/
+            sudo cp 99-anbox.rules /lib/udev/rules.d/
+            sudo cp -rT ashmem /usr/src/anbox-ashmem-1
+            sudo cp -rT binder /usr/src/anbox-binder-1
+            sudo dkms install anbox-ashmem/1
+            sudo dkms install anbox-binder/1
+            sudo modprobe ashmem_linux || true
+            sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+          fi
+          ls -la /dev/binder*
+
+      - name: Install Desktop Environment, Weston & noVNC
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-terminal dbus-x11 \
+            weston xwayland \
+            tigervnc-standalone-server tigervnc-common \
+            novnc websockify python3-numpy net-tools
+
+      - name: Install Waydroid
+        run: |
+          curl -s https://repo.waydro.id | sudo bash
+          sudo apt-get install -y waydroid
+          sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
+
+      - name: Configure VNC & Desktop Autostart
+        run: |
+          mkdir -p ~/.vnc
+          echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+
+          cat << 'EOF' > ~/.vnc/xstartup
+          #!/bin/bash
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          export XDG_RUNTIME_DIR=/tmp/runtime-runner
+          mkdir -p $XDG_RUNTIME_DIR
+          chmod 700 $XDG_RUNTIME_DIR
+          startxfce4 &
+          EOF
+          chmod +x ~/.vnc/xstartup
+
+      - name: Start Waydroid Container, VNC & noVNC
+        run: |
+          sudo systemctl start waydroid-container
+          vncserver :1 -geometry 1366x768 -depth 24 -localhost no
+          nohup websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
+          sleep 3
+
+      - name: Start Cloudflare Quick Tunnel (trycloudflare.com)
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
+          
+          echo "Waiting for TryCloudflare URL..."
+          for i in {1..30}; do
+            URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1)
+            if [ -n "$URL" ]; then
+              echo "=========================================================="
+              echo "🚀 ACCESS LINUX & WAYDROID IN BROWSER:"
+              echo "${URL}/vnc.html?autoconnect=true&resize=scale"
+              echo "🔑 VNC Password: waydroid123"
+              echo "=========================================================="
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Keep Session Alive
+        run: |
+          echo "Session active for ${{ github.event.inputs.session_duration }} minutes."
+          sleep $(( ${{ github.event.inputs.session_duration }} * 60 ))
