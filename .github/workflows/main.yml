@@ -31,11 +31,7 @@ jobs:
             git clone --depth=1 https://github.com/torvalds/linux.git /tmp/linux-src
 
             cd /tmp/linux-src/drivers/android
-            cat << 'EOF' > Makefile
-          obj-m += binder_linux.o
-          binder_linux-y := binder.o binder_alloc.o
-          ccflags-y += -DCONFIG_ANDROID_BINDERFS -DCONFIG_ANDROID_BINDER_IPC
-          EOF
+            printf "obj-m += binder_linux.o\nbinder_linux-y := binder.o binder_alloc.o\nccflags-y += -DCONFIG_ANDROID_BINDERFS -DCONFIG_ANDROID_BINDER_IPC\n" > Makefile
             make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
             sudo insmod binder_linux.ko devices="binder,hwbinder,vndbinder"
           fi
@@ -66,6 +62,7 @@ jobs:
       - name: Configure VNC, Desktop & Waydroid Launch Script
         run: |
           mkdir -p ~/.vnc ~/Desktop
+          touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
@@ -74,23 +71,24 @@ jobs:
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
-          mkdir -p $XDG_RUNTIME_DIR
-          chmod 700 $XDG_RUNTIME_DIR
-          startxfce4 &
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          exec dbus-launch --exit-with-session startxfce4
           EOF
+          sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
-          # One-click desktop script to launch Waydroid inside Weston
           cat << 'EOF' > ~/Desktop/start-waydroid.sh
           #!/bin/bash
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
-          mkdir -p $XDG_RUNTIME_DIR
-          chmod 700 $XDG_RUNTIME_DIR
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
           pkill -f weston || true
           weston --width=1280 --height=720 &
           sleep 2
           WAYLAND_DISPLAY=wayland-1 waydroid show-full-ui &
           EOF
+          sed -i 's/^[[:space:]]*//' ~/Desktop/start-waydroid.sh
           chmod +x ~/Desktop/start-waydroid.sh
 
       - name: Start Waydroid Container, VNC & noVNC
