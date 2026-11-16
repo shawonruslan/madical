@@ -18,28 +18,35 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Check Hardware & Kernel Capabilities
+      - name: Install Dependencies & Build Binder Kernel Module
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget lsb-release ca-certificates gnupg software-properties-common
+          sudo apt-get install -y curl wget git lsb-release ca-certificates gnupg \
+            software-properties-common build-essential linux-headers-$(uname -r)
 
-      - name: Install Binder Kernel Module (Required for Waydroid)
-        run: |
-          sudo apt-get install -y linux-modules-extra-$(uname -r) || true
-          if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"; then
-            echo "Standard binder module missing, building binder_linux via DKMS..."
-            sudo apt-get install -y dkms git build-essential linux-headers-$(uname -r)
-            git clone https://github.com/choff/anbox-modules.git /tmp/anbox-modules
-            cd /tmp/anbox-modules
-            sudo cp anbox.conf /etc/modules-load.d/
-            sudo cp 99-anbox.rules /lib/udev/rules.d/
-            sudo cp -rT ashmem /usr/src/anbox-ashmem-1
-            sudo cp -rT binder /usr/src/anbox-binder-1
-            sudo dkms install anbox-ashmem/1
-            sudo dkms install anbox-binder/1
-            sudo modprobe ashmem_linux || true
-            sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+          if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
+            echo "Building binder_linux directly for kernel $(uname -r)..."
+            KVER=$(uname -r | cut -d'-' -f1 | cut -d'.' -f1,2)
+            git clone --depth=1 https://github.com/torvalds/linux.git -b "v${KVER}" /tmp/linux-src || \
+            git clone --depth=1 https://github.com/torvalds/linux.git /tmp/linux-src
+
+            cd /tmp/linux-src/drivers/android
+            cat << 'EOF' > Makefile
+          obj-m += binder_linux.o
+          binder_linux-y := binder.o binder_alloc.o
+          ccflags-y += -DCONFIG_ANDROID_BINDERFS -DCONFIG_ANDROID_BINDER_IPC
+          EOF
+            make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+            sudo insmod binder_linux.ko devices="binder,hwbinder,vndbinder"
           fi
+
+          # Mount binderfs fallback if /dev/binder nodes were not auto-created
+          if [ ! -e /dev/binder ]; then
+            sudo mkdir -p /dev/binderfs
+            sudo mount -t binder binder /dev/binderfs || true
+            sudo ln -sf /dev/binderfs/* /dev/ 2>/dev/null || true
+          fi
+
           ls -la /dev/binder*
 
       - name: Install Desktop Environment, Weston & noVNC
@@ -56,9 +63,9 @@ jobs:
           sudo apt-get install -y waydroid
           sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
 
-      - name: Configure VNC & Desktop Autostart
+      - name: Configure VNC, Desktop & Waydroid Launch Script
         run: |
-          mkdir -p ~/.vnc
+          mkdir -p ~/.vnc ~/Desktop
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
@@ -72,6 +79,19 @@ jobs:
           startxfce4 &
           EOF
           chmod +x ~/.vnc/xstartup
+
+          # One-click desktop script to launch Waydroid inside Weston
+          cat << 'EOF' > ~/Desktop/start-waydroid.sh
+          #!/bin/bash
+          export XDG_RUNTIME_DIR=/tmp/runtime-runner
+          mkdir -p $XDG_RUNTIME_DIR
+          chmod 700 $XDG_RUNTIME_DIR
+          pkill -f weston || true
+          weston --width=1280 --height=720 &
+          sleep 2
+          WAYLAND_DISPLAY=wayland-1 waydroid show-full-ui &
+          EOF
+          chmod +x ~/Desktop/start-waydroid.sh
 
       - name: Start Waydroid Container, VNC & noVNC
         run: |
